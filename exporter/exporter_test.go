@@ -379,6 +379,38 @@ func TestKeyDbMetrics(t *testing.T) {
 	}
 }
 
+func TestHoldoffTimer(t *testing.T) {
+	r := prometheus.NewRegistry()
+	ts := httptest.NewServer(promhttp.HandlerFor(r, promhttp.HandlerOpts{}))
+	e, err := NewRedisExporter(os.Getenv("TEST_REDIS_URI"), Options{Holdoff: 2 * time.Second, Namespace: "test", Registry: r})
+	// e, err := NewRedisExporter("redis://localhost:6379", Options{Holdoff: 2 * time.Second, Namespace: "test", Registry: r})
+	if err != nil {
+		t.Fatalf(`error when creating exporter with registry: %s`, err)
+	}
+	r.Register(e)
+
+	fmt.Println("before")
+	// Collect twice -- 1 scrape, 1 cache hit
+	downloadURL(t, ts.URL+"/metrics")
+	downloadURL(t, ts.URL+"/metrics")
+	// Wait 3 seconds then collect again -- 2 scrape, 2 cache hit
+	time.Sleep(3 * time.Second)
+	downloadURL(t, ts.URL+"/metrics")
+	body := downloadURL(t, ts.URL+"/metrics")
+
+	if !strings.Contains(body, "test_exporter_scrapes_total 2") {
+		t.Errorf("want metrics to include exporter_build_info, have:\n%s", body)
+	}
+	if !strings.Contains(body, "test_exporter_cache_hits_total 2") {
+		t.Errorf("want metrics to include exporter_build_info, have:\n%s", body)
+	}
+	if !strings.Contains(body, "test_exporter_collect_calls_total 4") {
+		t.Errorf("want metrics to include exporter_build_info, have:\n%s", body)
+	}
+
+	ts.Close()
+}
+
 func init() {
 	rand.Seed(time.Now().UnixNano())
 

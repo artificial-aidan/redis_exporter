@@ -32,6 +32,8 @@ type Exporter struct {
 	totalScrapes              prometheus.Counter
 	scrapeDuration            prometheus.Summary
 	targetScrapeRequestErrors prometheus.Counter
+	totalCacheHits            prometheus.Counter
+	totalCollects             prometheus.Counter
 
 	metricDescriptions map[string]*prometheus.Desc
 
@@ -43,6 +45,7 @@ type Exporter struct {
 	mux *http.ServeMux
 
 	buildInfo BuildInfo
+	cache     *MetricCache
 }
 
 type Options struct {
@@ -78,6 +81,7 @@ type Options struct {
 	PingOnConnect         bool
 	Registry              *prometheus.Registry
 	BuildInfo             BuildInfo
+	Holdoff               time.Duration
 }
 
 // NewRedisExporter returns a new exporter of Redis metrics.
@@ -107,6 +111,18 @@ func NewRedisExporter(redisURI string, opts Options) (*Exporter, error) {
 			Namespace: opts.Namespace,
 			Name:      "target_scrape_request_errors_total",
 			Help:      "Errors in requests to the exporter",
+		}),
+
+		totalCacheHits: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: opts.Namespace,
+			Name:      "exporter_cache_hits_total",
+			Help:      "Current total redis scrapes that used cached data.",
+		}),
+
+		totalCollects: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: opts.Namespace,
+			Name:      "exporter_collect_calls_total",
+			Help:      "Current total metric collect calls.",
 		}),
 
 		metricMapGauges: map[string]string{
@@ -410,6 +426,12 @@ func NewRedisExporter(redisURI string, opts Options) (*Exporter, error) {
 		e.options.MetricsPath = "/metrics"
 	}
 
+	if e.options.Holdoff > 0 {
+		e.cache = &MetricCache{
+			holdoff: time.NewTicker(e.options.Holdoff),
+		}
+	}
+
 	e.mux = http.NewServeMux()
 
 	if e.options.Registry != nil {
@@ -457,8 +479,19 @@ func (e *Exporter) Describe(ch chan<- *prometheus.Desc) {
 
 // Collect fetches new metrics from the RedisHost and updates the appropriate metrics.
 func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
+	e.totalCollects.Inc()
+	if e.cache == nil {
+		e.collect(ch)
+	} else {
+		e.cachedCollect(ch)
+	}
+	ch <- e.totalCollects
+}
+
+func (e *Exporter) collect(ch chan<- prometheus.Metric) {
 	e.Lock()
 	defer e.Unlock()
+
 	e.totalScrapes.Inc()
 
 	if e.redisAddr != "" {
